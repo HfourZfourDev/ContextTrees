@@ -182,11 +182,37 @@ Two things are deliberately excluded from a snapshot: the `RelevanceScorer` and 
 model or a native bridge — not project data; a caller re-supplies them on restore. Sessions are
 ephemeral by design (§2, "micro layer") and are not part of a project snapshot either.
 
-The core package has no filesystem dependency, so a browser host is free to snapshot into
-IndexedDB or elsewhere. A Node file-store adapter (`src/persistence/file-store.ts`, atomic
-write-temp-then-rename) ships as a separate subpath export (`contexttrees/persistence`) rather than
-the main entry point, so consumers of the rest of the library on non-Node runtimes never pull in
-`node:fs`.
+The core package has no filesystem dependency, so a browser host is free to snapshot elsewhere. A
+Node file-store adapter (`src/persistence/file-store.ts`, atomic write-temp-then-rename) ships as a
+separate subpath export (`contexttrees/persistence`) rather than the main entry point, so consumers
+of the rest of the library on non-Node runtimes never pull in `node:fs`. Three browser-oriented
+adapters follow the same subpath-per-backend pattern:
+
+- **IndexedDB** (`src/persistence/indexeddb-store.ts`, `contexttrees/persistence-indexeddb`) — the
+  universal browser fallback. IndexedDB transactions already commit atomically, so no
+  temp-key/rename dance is needed. Projects are keyed by an overridable `projectId` (default
+  `"default"`) within an overridable database/store name, so one database can hold more than one
+  project.
+- **File System Access API** (`src/persistence/fs-access-store.ts`,
+  `contexttrees/persistence-fs-access`) — reads/writes a JSON file at a relative path (default
+  `.contexttrees/project.json`) within a caller-supplied `FileSystemDirectoryHandle`; the host owns
+  obtaining that handle and any permission grant. **Chromium-only**: Chrome/Edge/Opera implement the
+  local-disk picker this relies on, Firefox and Safari expose only the sandboxed Origin Private File
+  System. Per the spec/MDN, `createWritable()` writes to a temporary swap file and only replaces the
+  real file on `close()`, giving the same crash-safety guarantee as the Node adapter's
+  write-temp-then-rename — with one caveat the Node adapter doesn't have: the default `"siloed"`
+  locking mode lets independent concurrent writers each open their own swap file, and the *last one
+  closed* wins silently rather than erroring.
+- **GitHub Contents API** (`src/persistence/github-store.ts`, `contexttrees/persistence-github`) —
+  plain `fetch` against `/repos/{owner}/{repo}/contents/{path}` (no SDK dependency, matching how
+  `src/scoring/llama-cpp.ts` talks to its HTTP API); the caller supplies `owner`/`repo`/`path`/
+  `branch`/`token`, never bundled or defaulted. Direct-commit only for now — opening a pull request
+  instead (which would make this a genuine review mechanism matching `Director`'s manual-review
+  mode) is a distinctly bigger feature, tracked as a follow-up rather than built here. Updates
+  require the file's current blob `sha`; if a caller doesn't supply one, it's auto-resolved via a
+  GET immediately before the write, and a mismatched sha on GitHub's side comes back as an HTTP 409
+  surfaced as `GitHubConflictError` rather than a silent clobber. `getProjectFileSha` lets a caller
+  capture a sha up front for an explicit read-modify-write.
 
 ## 8. Execution gating on session refresh
 
