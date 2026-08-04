@@ -1,4 +1,5 @@
 import type { AgentDescriptor, DesignMapNodeContent, ReviewModeConfig } from "./types.js";
+import type { AssembledContext } from "./design-map.js";
 
 export interface ContextPass {
   atEpochMs: number;
@@ -18,6 +19,9 @@ export interface MicroSessionInit {
   branchNodeId: string;
   agents: AgentDescriptor[];
   reviewMode: ReviewModeConfig;
+  /** Computed by Director.startSession from the design map — the targeted context this session was actually given. */
+  context: AssembledContext;
+  contextText: string;
 }
 
 /**
@@ -32,6 +36,8 @@ export class MicroSession {
   readonly branchNodeId: string;
   readonly agents: AgentDescriptor[];
   readonly reviewMode: ReviewModeConfig;
+  readonly context: AssembledContext;
+  readonly contextText: string;
   status: SessionStatus = "running";
   private passes: ContextPass[] = [];
 
@@ -41,6 +47,8 @@ export class MicroSession {
     this.branchNodeId = init.branchNodeId;
     this.agents = init.agents;
     this.reviewMode = init.reviewMode;
+    this.context = init.context;
+    this.contextText = init.contextText;
   }
 
   recordContextPass(note: string): ContextPass {
@@ -66,6 +74,13 @@ export interface DesignMapUpdateRequest {
   content: DesignMapNodeContent;
 }
 
+/** A director decision to bring a node into or out of AI-pass context, without deleting it. */
+export interface ActivationUpdateRequest {
+  nodeId: string;
+  active: boolean;
+  reason?: string;
+}
+
 /**
  * What a session proposes to retain, before relevance is resolved. Omitting
  * `relevanceScore` tells the director to compute it via the configured
@@ -88,5 +103,6 @@ export interface AgentMemoryUpdateRequest {
 export interface EndSessionInput {
   designMapUpdates: DesignMapUpdateRequest[];
   agentMemoryUpdates: AgentMemoryUpdateRequest[];
+  activationUpdates?: ActivationUpdateRequest[];
   trimThreshold?: number;
 }

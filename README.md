@@ -14,22 +14,30 @@ Long-running AI-assisted projects tend to hit one of two failure modes: every ne
 zero context (the user re-explains the project each time), or every chat inherits the entire
 history (context bloat, stale/contradictory state). ContextTrees splits the difference:
 
-- A **macro layer** holds the project's persistent, versioned state — a hierarchical design map
-  (System → Subsystem → Component) that changes deliberately.
+- A **macro layer** holds the project's persistent, versioned state. The roadmap *is* the tree:
+  every built feature, planned feature, shell (integration point that exists but isn't built out),
+  and unintegrated piece is a node, nested to whatever depth makes sense — not a fixed 3-tier
+  hierarchy. Nodes in different branches can reference each other via **edges** ("checkout flows
+  into payments"), independent of the parent/child structure.
 - A **micro layer** spins up ephemeral sessions scoped to one feature/task, assembled from the
-  relevant *branch* of the design map instead of the whole thing.
+  relevant *branch* of the design map plus its edge-declared dependencies — never the whole map.
+- A branch can go **dormant** without being deleted: still there, still auditable, just excluded
+  from context assembly until the director decides it's relevant again.
 - When a session ends, its outcome splits into two independent, reviewable update paths: what the
-  design map should absorb, and what the agent should carry forward into future sessions.
+  design map should absorb (including activation changes), and what the agent should carry forward
+  into future sessions.
 
 ## Core concepts
 
 | Concept | Module | What it is |
 |---|---|---|
-| Design map | `src/design-map.ts` | Versioned, hierarchical project state. Updates append a new version; nothing is overwritten. |
+| Design map | `src/design-map.ts` | Versioned, unconstrained-depth roadmap tree. Each node has a `status` (built/planned/shell/unintegrated). Updates append a new version; nothing is overwritten. |
+| Edges + context assembly | `src/design-map.ts` | Cross-branch references with a **prune level** (`full` / `interface` / `reference`) controlling how much of the target gets pulled into a session's context. |
+| Activation | `src/design-map.ts` | A node can go active/dormant without being deleted — dormant branches are excluded from context assembly but remain in the map for audit and reactivation. |
 | Agent memory | `src/agent-memory.ts` | Per-agent retained context, tagged by session + timestamp, scored for retain/drop and for splitting into a parallel sibling agent. |
 | Harness | `src/harness.ts` | A toolset + system prompt + constraints an agent is equipped with, independent of any one agent instance. |
-| Director | `src/director.ts` | The macro agent: starts sessions scoped to a design-map branch, reconciles their outcomes back. |
-| Micro session | `src/session.ts` | The ephemeral, feature-scoped unit of work; tracks recurring context passes to its agents. |
+| Director | `src/director.ts` | The macro agent: starts sessions scoped to a design-map branch (assembling its targeted context), reconciles their outcomes back, audits dormant branches. |
+| Micro session | `src/session.ts` | The ephemeral, feature-scoped unit of work; carries the context it was actually given, tracks recurring context passes to its agents. |
 | Review mode | `src/review.ts` | Per-branch (design map vs. agent memory) auto-commit vs. manual-review-then-commit. |
 | Refresh gate | `src/scheduler.ts` | Gates automated runs on a host's usage/session refresh, via a pluggable wakeup-scheduler adapter. |
 | Relevance scoring | `src/scoring/` | Pluggable context-manager scoring: no-model default, local model (llama.cpp), device AI (Apple). |
@@ -40,8 +48,14 @@ history (context bloat, stale/contradictory state). ContextTrees splits the diff
 import { Director, equipAgent, AUTO_REVIEW } from "contexttrees";
 
 const director = new Director();
-const system = director.designMap.addNode("system", "Core");
-const auth = director.designMap.addNode("subsystem", "Auth", system.id);
+const auth = director.designMap.addNode("feature", "Auth", null, { status: "built" });
+const payments = director.designMap.addNode("feature", "Payments", null, { status: "built" });
+const someStaleNode = director.designMap.addNode("feature", "Old password-reset flow", auth.id, { status: "shell" });
+
+// Auth and Payments live in different branches but need to talk — declare the
+// relationship explicitly, and control how much of Payments a session about
+// Auth actually gets: "full" because this is genuine mutual dependency.
+director.designMap.addEdge(auth.id, payments.id, "integrates-with", "full");
 
 const harness = director.harnesses.register({
   id: "reader",
@@ -52,17 +66,19 @@ const harness = director.harnesses.register({
 
 const agent = equipAgent("micro", harness);
 const session = director.startSession({
-  description: "Add a login form to the Auth subsystem",
+  description: "Add a login form to Auth",
   branchNodeId: auth.id,
   agents: [agent],
   reviewMode: AUTO_REVIEW,
 });
 
+// session.contextText is exactly what got assembled: the Auth branch in full,
+// plus Payments pulled in at "full" via the edge -- not the whole map.
 session.recordContextPass("scoped to existing session-token handling");
 
 const outcome = await director.endSession(session, {
   designMapUpdates: [
-    { nodeId: auth.id, content: { summary: "Auth + login form", roadmap: [], bugs: [], futureReview: [] } },
+    { nodeId: auth.id, content: { summary: "Auth + login form", status: "built", roadmap: [], bugs: [], futureReview: [] } },
   ],
   agentMemoryUpdates: [
     {
@@ -71,11 +87,18 @@ const outcome = await director.endSession(session, {
       retain: [{ concept: "login-form-pattern", content: "...", reuseScore: 0.8 }],
     },
   ],
+  // The director judged some other branch stale during review -- deactivate it
+  // rather than delete it. It stays in the map, out of context, until reactivated.
+  activationUpdates: [{ nodeId: someStaleNode.id, active: false, reason: "superseded by login-form-pattern" }],
 });
 
-// AUTO_REVIEW commits both branches immediately; outcome.designMap.committed === true.
+// AUTO_REVIEW commits all three (content, activation, agent memory) immediately.
 // With MANUAL_REVIEW instead, nothing commits until outcome.designMap.apply(...) /
 // outcome.agentMemory.apply(...) is called — optionally with a selected subset.
+
+// Later: audit what's dormant, and bring something back if it turns out relevant.
+director.auditDormantBranches().forEach((n) => console.log(n.name, "is dormant"));
+director.designMap.activate(someStaleNode.id, { reason: "turns out we need it again" });
 ```
 
 ### Relevance scoring: three context-manager options
@@ -143,5 +166,7 @@ npm run build   # emits dist/, gitignored
 ## Status
 
 Early scaffold implementing the spec in `docs/SPEC.md`. Open questions (concurrent-branch writes,
-a real embedding/frequency-based scoring model, restore/rollback of superseded versions, a review-mode
-UI) are tracked at the bottom of that document rather than here.
+a real embedding/frequency-based scoring model, restore/rollback of superseded *content* versions,
+how deep to chase edges, a review-mode UI) are tracked at the bottom of that document rather than
+here. Note that node **activation** (dormant vs. active) is implemented and is not one of those
+open questions — it's a separate, working mechanism from content-version rollback.

@@ -1,16 +1,21 @@
 import { DesignMap } from "./design-map.js";
+import type { DesignMapNode } from "./types.js";
 import { AgentMemoryStore, type ParallelAgentRecommendation, type RetainInput, type TrimRecommendationItem } from "./agent-memory.js";
 import { HarnessRegistry } from "./harness.js";
-import { MicroSession, type EndSessionInput, type MicroSessionInit } from "./session.js";
+import { MicroSession, type ActivationUpdateRequest, type EndSessionInput, type MicroSessionInit } from "./session.js";
 import type { DesignMapNodeContent, ReviewMode } from "./types.js";
 import { KeywordOverlapScorer } from "./scoring/keyword-overlap.js";
 import type { RelevanceScorer } from "./scoring/types.js";
 
+/** What a caller supplies to start a session — `context`/`contextText` are computed by the director, not passed in. */
+export type StartSessionInput = Omit<MicroSessionInit, "context" | "contextText">;
+
 export interface DesignMapOutcome {
   mode: ReviewMode;
   recommendation: { nodeId: string; content: DesignMapNodeContent }[];
+  activationRequests: ActivationUpdateRequest[];
   committed: boolean;
-  /** Manual mode: commit some/all of the recommendation. Auto mode: already committed. */
+  /** Manual mode: commit some/all of the recommendation (content and activation updates alike). Auto mode: already committed. */
   apply: (selectedNodeIds?: string[]) => void;
 }
 
@@ -53,13 +58,30 @@ export class Director {
     this.scorer = scorer;
   }
 
-  /** Scope a new micro session to a design-map branch and equip it with agents. */
-  startSession(init: MicroSessionInit): MicroSession {
+  /**
+   * Scope a new micro session to a design-map branch and equip it with
+   * agents. Context passed to the session is assembled here: the branch's
+   * own active subtree in full, plus whatever it references via edges, at
+   * each edge's prune level — not the whole map.
+   */
+  startSession(init: StartSessionInput): MicroSession {
     this.designMap.requireNode(init.branchNodeId);
+    if (!this.designMap.isActive(init.branchNodeId)) {
+      throw new Error(
+        `Director.startSession: node "${init.branchNodeId}" is dormant — reactivate it (designMap.activate) before scoping a session to it`,
+      );
+    }
     for (const agent of init.agents) {
       this.harnesses.requireHarness(agent.harnessId);
     }
-    return new MicroSession(init);
+    const context = this.designMap.assembleContext(init.branchNodeId);
+    const contextText = this.designMap.contextText(context);
+    return new MicroSession({ ...init, context, contextText });
+  }
+
+  /** Dormant nodes for review — stored, excluded from context passes, never deleted. Scope to a branch or omit for the whole map. */
+  auditDormantBranches(rootId?: string): DesignMapNode[] {
+    return this.designMap.dormantNodes(rootId);
   }
 
   /**
@@ -70,14 +92,24 @@ export class Director {
   async endSession(session: MicroSession, input: EndSessionInput): Promise<SessionOutcome> {
     session.end();
     const threshold = input.trimThreshold ?? 0.4;
-    const branchContext = this.designMap.branchText(session.branchNodeId);
+    const branchContext = session.contextText;
+    const activationUpdates = input.activationUpdates ?? [];
 
     const applyDesignMap = (selectedNodeIds?: string[]) => {
-      const toApply = selectedNodeIds
+      const contentToApply = selectedNodeIds
         ? input.designMapUpdates.filter((u) => selectedNodeIds.includes(u.nodeId))
         : input.designMapUpdates;
-      for (const update of toApply) {
+      for (const update of contentToApply) {
         this.designMap.update(update.nodeId, update.content, { sessionId: session.id });
+      }
+
+      const activationToApply = selectedNodeIds
+        ? activationUpdates.filter((u) => selectedNodeIds.includes(u.nodeId))
+        : activationUpdates;
+      for (const update of activationToApply) {
+        const opts = { reason: update.reason, sessionId: session.id };
+        if (update.active) this.designMap.activate(update.nodeId, opts);
+        else this.designMap.deactivate(update.nodeId, opts);
       }
     };
     const designMapMode = session.reviewMode.designMap;
@@ -85,6 +117,7 @@ export class Director {
     const designMap: DesignMapOutcome = {
       mode: designMapMode,
       recommendation: input.designMapUpdates,
+      activationRequests: activationUpdates,
       committed: designMapMode === "auto",
       apply: applyDesignMap,
     };

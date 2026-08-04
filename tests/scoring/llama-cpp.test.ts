@@ -12,7 +12,7 @@ function jsonResponse(body: unknown): Response {
 
 describe("LlamaCppScorer", () => {
   it("embeds via the OpenAI-compatible /v1/embeddings endpoint by default", async () => {
-    const fetchImpl = vi.fn(async (url: string | URL, init?: RequestInit) => {
+    const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
       const body = JSON.parse(init!.body as string) as { input: string };
       const vector = body.input === "content" ? [1, 0, 0] : [1, 0, 0];
       expect(url.toString()).toBe("http://127.0.0.1:8080/v1/embeddings");
@@ -26,7 +26,7 @@ describe("LlamaCppScorer", () => {
   });
 
   it("falls back to the legacy /embedding endpoint when configured", async () => {
-    const fetchImpl = vi.fn(async (url: string | URL) => {
+    const fetchImpl = vi.fn(async (url: RequestInfo | URL) => {
       expect(url.toString()).toBe("http://localhost:9000/embedding");
       return jsonResponse({ embedding: [0, 1, 0] });
     });

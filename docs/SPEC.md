@@ -11,8 +11,14 @@ mind, but standalone — no dependency on any specific host project or LLM provi
 
 - **Project** — goals, constraints, glossary, top-level decisions. Changes rarely, changes
   deliberately.
-- **Design map** — hierarchical structure: System → Subsystem → Component. Each node represents
-  current state of a piece of the design. Versioned.
+- **Design map** — the roadmap *is* the tree: nesting is unconstrained (any node can branch into
+  sub-nodes), not fixed to a 3-tier System/Subsystem/Component shape. Each node carries a
+  `status` — `built`, `planned` (covers both "future feature" and "planned expansion of an
+  existing feature," expressed as a child node under the feature it expands), `shell`
+  (integration point exists, not built out), or `unintegrated`. Nodes are versioned.
+- **Cross-branch edges** — a node can reference a node in a different branch (e.g. "checkout flows
+  into payments," "X and Y are supposed to talk but currently don't"). This is separate from the
+  parent/child hierarchy — see §2a.
 - **Design director agent (macro agent)** — routes context into micro sessions, reconciles updates
   back into the design map, maintains coherence across the project. Macro agents receive more
   deliberate tweaks/review than micro agents.
@@ -36,6 +42,44 @@ mind, but standalone — no dependency on any specific host project or LLM provi
    a one-time injection).
 6. Session ends.
 7. Split into two parallel, independent update paths (Branch A, Branch B — see below).
+
+## 2a. Context assembly: edges and prune levels
+
+A branch's own subtree can't carry everything a session needs — features that reference each
+other often live in different branches. A node can declare an edge to a node elsewhere in the map,
+and every edge carries a **prune level** controlling how much of the target gets pulled into a
+session's context:
+
+- **`full`** — the target's entire active subtree, full content. Use for genuinely co-dependent
+  features where the session needs real context on both sides.
+- **`interface`** — just the target node's own current content, no descendants. Use for "this is
+  our data flow hookup point" — enough to know the shape of the interface, not its internals.
+- **`reference`** — just an identifying pointer (name + status). Aggressively pruned: a bare
+  acknowledgement that something exists, nothing more.
+
+Edge traversal is **one hop only** from the session's primary branch — edges are not chased
+transitively, so a chain of `full` edges can't silently pull in the whole map. A dormant edge
+target (§2b) is skipped even if referenced.
+
+This is how "the director only passes relevant context" stays true in practice: the session gets
+its own branch in full, plus exactly the declared dependencies at exactly the declared level of
+detail, and nothing else.
+
+## 2b. Activation: dormant, not deleted
+
+A node can be marked **active** or **dormant** without ever being removed from the map:
+
+- Dormant nodes (and their whole subtree) are excluded from context assembly — a session scoped
+  near a dormant branch never sees it, and a session can't be scoped *to* a dormant node at all
+  until it's reactivated.
+- Dormant nodes are still listed by structural/audit queries (the roadmap can still say "this node
+  has 3 branches, 2 dormant") and still carry their full version history.
+- The director can audit dormant nodes at any time and reactivate one if it becomes relevant
+  again — nothing about deactivation is destructive or one-way.
+
+This is deliberately not version rollback. Version history (§6) is an append-only content log per
+node; activation is an orthogonal on/off switch for whether a node's content is pulled into AI
+context at all, and both persist independently of session review mode.
 
 ## 3. Branch A — Agent memory
 
@@ -68,6 +112,9 @@ Governs what gets written back into the persistent design map.
   it's committed.
 - **Result**: design map updated — reflected in roadmap, bugs, and future-review sections of the
   affected node(s). Versioned, same conflict model as agent memory.
+- **Activation requests** flow through the same review gate as content updates: the director can
+  propose deactivating a branch it judges no longer relevant (§2b) as part of a session's output,
+  auto-committed or held for manual selection exactly like a content change.
 
 ## 5. Review mode
 
@@ -82,8 +129,11 @@ Governs what gets written back into the persistent design map.
 
 ## 6. Data model notes
 
-- **Design map**: hierarchical (System → Subsystem → Component), versioned nodes, each carrying
-  roadmap / bugs / future-review metadata.
+- **Design map**: unconstrained-depth tree, versioned nodes, each carrying a `status`
+  (built/planned/shell/unintegrated) plus roadmap / bugs / future-review metadata, and an
+  independent active/dormant flag (§2b).
+- **Edges**: `{ fromNodeId, toNodeId, kind, pruneLevel, note? }` — cross-branch relationships,
+  separate from the parent/child hierarchy (§2a).
 - **Agent memory**: per-agent list of retained context groups, each tagged (session_id,
   timestamp). Conflicting groups on the same concept are versioned, not overwritten.
 - **Agent lineage**: parent_agent_id + originating_session_id on any spawned parallel agent.
@@ -127,6 +177,12 @@ delayed resumption.
   avoids corruption but does not yet detect or flag concurrent-edit conflicts to the user.
 - UI for the "confirm review mode" step — per-session prompt vs. a stored default with an override.
   Out of scope for this library; `ReviewModeConfig` supports both call patterns, no UI shipped here.
-- Whether users can browse/restore superseded versions in the agent-memory and design-map version
-  history, or whether that's read-only audit trail for now. Current implementation: read-only audit
-  trail (`history()` accessors); no restore/rollback API yet.
+- Whether users can browse/restore superseded *content* versions in the agent-memory and
+  design-map version history, or whether that's read-only audit trail for now. Current
+  implementation: read-only audit trail (`history()` accessors); no restore/rollback API yet. Note
+  this is distinct from activation (§2b), which is implemented and is not version-based: a node's
+  content history is untouched by deactivation, only its inclusion in context assembly changes.
+- How deeply to chase edges. Current implementation is one hop only from the primary branch,
+  deliberately, to keep context bounded and predictable. Worth revisiting if one-hop turns out to
+  miss real transitive dependencies in practice (e.g. A needs an `interface`-level view of B, which
+  itself needs a `full` view of C).

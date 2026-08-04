@@ -28,7 +28,9 @@ describe("Director + MicroSession", () => {
     });
 
     const outcome = await director.endSession(session, {
-      designMapUpdates: [{ nodeId: sub.id, content: { summary: "Auth + login form", roadmap: [], bugs: [], futureReview: [] } }],
+      designMapUpdates: [
+        { nodeId: sub.id, content: { summary: "Auth + login form", status: "built", roadmap: [], bugs: [], futureReview: [] } },
+      ],
       agentMemoryUpdates: [
         {
           agentId: agent.id,
@@ -54,7 +56,9 @@ describe("Director + MicroSession", () => {
     });
 
     const outcome = await director.endSession(session, {
-      designMapUpdates: [{ nodeId: sub.id, content: { summary: "Auth + login form", roadmap: [], bugs: [], futureReview: [] } }],
+      designMapUpdates: [
+        { nodeId: sub.id, content: { summary: "Auth + login form", status: "built", roadmap: [], bugs: [], futureReview: [] } },
+      ],
       agentMemoryUpdates: [
         {
           agentId: agent.id,
@@ -138,6 +142,7 @@ describe("Director + MicroSession", () => {
     const { director, sub, harness } = setup();
     director.designMap.update(sub.id, {
       summary: "Handles login sessions and password resets",
+      status: "built",
       roadmap: [],
       bugs: [],
       futureReview: [],
@@ -167,5 +172,68 @@ describe("Director + MicroSession", () => {
     const onTopic = items.find((i) => i.group.concept === "on-topic")!;
     const offTopic = items.find((i) => i.group.concept === "off-topic")!;
     expect(onTopic.group.relevanceScore).toBeGreaterThan(offTopic.group.relevanceScore);
+  });
+
+  it("scopes a session's context to the branch plus edge references, not the whole map", () => {
+    const { director, sub, harness } = setup();
+    const unrelated = director.designMap.addNode("subsystem", "Billing", null, {
+      summary: "totally separate subsystem",
+      status: "built",
+    });
+    const agent = equipAgent("micro", harness);
+
+    const session = director.startSession({
+      description: "Add login form",
+      branchNodeId: sub.id,
+      agents: [agent],
+      reviewMode: AUTO_REVIEW,
+    });
+
+    expect(session.context.primary.map((n) => n.id)).toEqual([sub.id]);
+    expect(session.contextText).not.toContain("Billing");
+    expect(session.context.primary.map((n) => n.id)).not.toContain(unrelated.id);
+  });
+
+  it("rejects starting a session scoped to a dormant node until it's reactivated", () => {
+    const { director, sub, harness } = setup();
+    director.designMap.deactivate(sub.id, { reason: "shelved" });
+    const agent = equipAgent("micro", harness);
+
+    expect(() =>
+      director.startSession({ description: "x", branchNodeId: sub.id, agents: [agent], reviewMode: AUTO_REVIEW }),
+    ).toThrow(/dormant/);
+
+    director.designMap.activate(sub.id, { reason: "relevant again" });
+    expect(() =>
+      director.startSession({ description: "x", branchNodeId: sub.id, agents: [agent], reviewMode: AUTO_REVIEW }),
+    ).not.toThrow();
+  });
+
+  it("applies activationUpdates under the same design-map review gate as content updates, and exposes an audit list", async () => {
+    const { director, sub, harness } = setup();
+    const staleChild = director.designMap.addNode("component", "Old experiment", sub.id, { status: "shell" });
+    const agent = equipAgent("micro", harness);
+    const session = director.startSession({
+      description: "Clean up stale branches",
+      branchNodeId: sub.id,
+      agents: [agent],
+      reviewMode: MANUAL_REVIEW,
+    });
+
+    const outcome = await director.endSession(session, {
+      designMapUpdates: [],
+      agentMemoryUpdates: [],
+      activationUpdates: [{ nodeId: staleChild.id, active: false, reason: "not relevant, revisit later" }],
+    });
+
+    expect(director.designMap.isActive(staleChild.id)).toBe(true);
+    outcome.designMap.apply();
+    expect(director.designMap.isActive(staleChild.id)).toBe(false);
+
+    const audit = director.auditDormantBranches(sub.id);
+    expect(audit.map((n) => n.id)).toEqual([staleChild.id]);
+
+    director.designMap.activate(staleChild.id, { reason: "turns out it's relevant again" });
+    expect(director.auditDormantBranches(sub.id)).toHaveLength(0);
   });
 });
