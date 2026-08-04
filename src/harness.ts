@@ -42,6 +42,17 @@ export class HarnessRegistry {
   all(): Harness[] {
     return [...this.harnesses.values()];
   }
+
+  toSnapshot(): Harness[] {
+    return this.all();
+  }
+
+  /** Lossless: harnesses carry no timestamps/versioning, so restoring via `register` doesn't lose anything. */
+  static fromSnapshot(harnesses: Harness[]): HarnessRegistry {
+    const registry = new HarnessRegistry();
+    for (const harness of harnesses) registry.register(harness);
+    return registry;
+  }
 }
 
 let agentCounter = 0;

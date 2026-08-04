@@ -30,6 +30,13 @@ export interface ParallelAgentRecommendation {
   reason: string;
 }
 
+export interface AgentMemorySnapshot {
+  agentId: string;
+  lineage?: AgentLineage;
+  /** Every retained group across every concept, flattened — concept + version reconstruct per-concept ordering on restore. */
+  groups: RetainedContextGroup[];
+}
+
 function scoreGroup(group: RetainedContextGroup, threshold: number): TrimRecommendationItem {
   const score = (group.relevanceScore + group.reuseScore) / 2;
   const action: TrimAction = score >= threshold ? "retain" : "drop";
@@ -143,6 +150,27 @@ export class AgentMemory {
         reason: `reuse ${group.reuseScore.toFixed(2)} >= ${reuseThreshold} but relevance ${group.relevanceScore.toFixed(2)} <= ${relevanceCeiling}: likely outgrew this agent's scope`,
       }));
   }
+
+  /** Every retained group, exactly as stored — original ids, versions, and timestamps included. */
+  toSnapshot(): AgentMemorySnapshot {
+    return {
+      agentId: this.agentId,
+      lineage: this.lineage,
+      groups: [...this.groups.values()].flat(),
+    };
+  }
+
+  /** Rebuilds an AgentMemory with the exact stored groups/versions/timestamps — not a replay through `retain`, which would mint new ones. */
+  static fromSnapshot(snapshot: AgentMemorySnapshot): AgentMemory {
+    const memory = new AgentMemory(snapshot.agentId, snapshot.lineage);
+    for (const group of snapshot.groups) {
+      const list = memory.groups.get(group.concept) ?? [];
+      list.push(group);
+      memory.groups.set(group.concept, list);
+    }
+    for (const list of memory.groups.values()) list.sort((a, b) => a.version - b.version);
+    return memory;
+  }
 }
 
 /** Registry of per-agent memories, keyed by agent id. */
@@ -160,5 +188,17 @@ export class AgentMemoryStore {
 
   get(agentId: string): AgentMemory | undefined {
     return this.memories.get(agentId);
+  }
+
+  toSnapshot(): AgentMemorySnapshot[] {
+    return [...this.memories.values()].map((memory) => memory.toSnapshot());
+  }
+
+  static fromSnapshot(snapshots: AgentMemorySnapshot[]): AgentMemoryStore {
+    const store = new AgentMemoryStore();
+    for (const snapshot of snapshots) {
+      store.memories.set(snapshot.agentId, AgentMemory.fromSnapshot(snapshot));
+    }
+    return store;
   }
 }

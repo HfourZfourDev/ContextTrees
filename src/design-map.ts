@@ -8,7 +8,14 @@ import type {
   EdgeKind,
   EdgeRelevance,
 } from "./types.js";
-import { classifyDetail, DEFAULT_TRAVERSAL_OPTIONS, type ContextDetailLevel, type ContextTraversalOptions } from "./context-traversal.js";
+import {
+  classifyDetail,
+  DEFAULT_TRAVERSAL_OPTIONS,
+  defaultRelevanceCombinator,
+  type ContextDetailLevel,
+  type ContextTraversalOptions,
+  type RelevanceCombinator,
+} from "./context-traversal.js";
 
 let nodeCounter = 0;
 function nextNodeId(): string {
@@ -50,6 +57,15 @@ export interface AssembledContext {
    * path).
    */
   references: AssembledReference[];
+}
+
+/** The numeric traversal knobs, without `combinator` — functions aren't serializable, so a snapshot never carries one. */
+export type PersistedTraversalOptions = Omit<ContextTraversalOptions, "combinator">;
+
+export interface DesignMapSnapshot {
+  nodes: DesignMapNode[];
+  edges: DesignMapEdge[];
+  traversalDefaults: PersistedTraversalOptions;
 }
 
 /**
@@ -332,5 +348,31 @@ export class DesignMap {
   private renderReference(node: DesignMapNode): string {
     const content = this.current(node.id);
     return `${node.name} [${content.status}]`;
+  }
+
+  // ---- Persistence ------------------------------------------------------
+
+  /**
+   * Every node and edge exactly as stored — original ids, version numbers,
+   * `committedAt`/activation timestamps included. `combinator` is dropped
+   * (functions aren't serializable); restore it explicitly via
+   * `fromSnapshot`'s second argument, or it falls back to the library
+   * default, which is only equivalent if that's what was in use originally.
+   */
+  toSnapshot(): DesignMapSnapshot {
+    const { combinator: _combinator, ...persistedDefaults } = this.traversalDefaults;
+    return {
+      nodes: this.allNodes(),
+      edges: this.allEdges(),
+      traversalDefaults: persistedDefaults,
+    };
+  }
+
+  /** Rebuilds a DesignMap with the exact stored nodes/edges/timestamps — not a replay through `addNode`/`update`, which would mint new ones. */
+  static fromSnapshot(snapshot: DesignMapSnapshot, combinator: RelevanceCombinator = defaultRelevanceCombinator): DesignMap {
+    const map = new DesignMap({ ...snapshot.traversalDefaults, combinator });
+    for (const node of snapshot.nodes) map.nodes.set(node.id, node);
+    for (const edge of snapshot.edges) map.edges.set(edge.id, edge);
+    return map;
   }
 }

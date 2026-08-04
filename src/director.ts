@@ -1,15 +1,37 @@
-import { DesignMap } from "./design-map.js";
+import { DesignMap, type DesignMapSnapshot } from "./design-map.js";
 import type { DesignMapNode } from "./types.js";
-import { AgentMemoryStore, type ParallelAgentRecommendation, type RetainInput, type TrimRecommendationItem } from "./agent-memory.js";
+import {
+  AgentMemoryStore,
+  type AgentMemorySnapshot,
+  type ParallelAgentRecommendation,
+  type RetainInput,
+  type TrimRecommendationItem,
+} from "./agent-memory.js";
 import { HarnessRegistry } from "./harness.js";
 import { MicroSession, type ActivationUpdateRequest, type EndSessionInput, type MicroSessionInit } from "./session.js";
-import type { DesignMapNodeContent, ReviewMode } from "./types.js";
-import type { ContextTraversalOptions } from "./context-traversal.js";
+import type { DesignMapNodeContent, Harness, ReviewMode } from "./types.js";
+import type { ContextTraversalOptions, RelevanceCombinator } from "./context-traversal.js";
 import { KeywordOverlapScorer } from "./scoring/keyword-overlap.js";
 import type { RelevanceScorer } from "./scoring/types.js";
 
 /** What a caller supplies to start a session — `context`/`contextText` are computed by the director, not passed in. */
 export type StartSessionInput = Omit<MicroSessionInit, "context" | "contextText">;
+
+/** Schema version of `ProjectSnapshot` — bump and branch on this in `Director.fromSnapshot` if the shape ever changes incompatibly. */
+export const PROJECT_SNAPSHOT_SCHEMA_VERSION = 1;
+
+export interface ProjectSnapshot {
+  schemaVersion: typeof PROJECT_SNAPSHOT_SCHEMA_VERSION;
+  designMap: DesignMapSnapshot;
+  agentMemories: AgentMemorySnapshot[];
+  harnesses: Harness[];
+}
+
+/** What a caller supplies when restoring a Director from a snapshot — both are runtime dependencies, not serializable project data. */
+export interface RestoreDirectorOptions {
+  scorer?: RelevanceScorer;
+  combinator?: RelevanceCombinator;
+}
 
 export interface DesignMapOutcome {
   mode: ReviewMode;
@@ -183,5 +205,36 @@ export class Director {
     };
 
     return { session, designMap, agentMemory };
+  }
+
+  // ---- Persistence ------------------------------------------------------
+
+  /**
+   * The whole project's persistent state — design map, agent memories,
+   * harnesses — exactly as stored. `scorer` and the design map's
+   * `combinator` are deliberately excluded: they're runtime dependencies
+   * (possibly functions, possibly reaching out to a local model or a
+   * native bridge), not project data. Sessions are ephemeral by design and
+   * are not part of a project snapshot either.
+   */
+  toSnapshot(): ProjectSnapshot {
+    return {
+      schemaVersion: PROJECT_SNAPSHOT_SCHEMA_VERSION,
+      designMap: this.designMap.toSnapshot(),
+      agentMemories: this.agentMemories.toSnapshot(),
+      harnesses: this.harnesses.toSnapshot(),
+    };
+  }
+
+  static fromSnapshot(snapshot: ProjectSnapshot, options: RestoreDirectorOptions = {}): Director {
+    if (snapshot.schemaVersion !== PROJECT_SNAPSHOT_SCHEMA_VERSION) {
+      throw new Error(
+        `Director.fromSnapshot: unsupported schema version ${snapshot.schemaVersion} (expected ${PROJECT_SNAPSHOT_SCHEMA_VERSION})`,
+      );
+    }
+    const designMap = DesignMap.fromSnapshot(snapshot.designMap, options.combinator);
+    const harnesses = HarnessRegistry.fromSnapshot(snapshot.harnesses);
+    const agentMemories = AgentMemoryStore.fromSnapshot(snapshot.agentMemories);
+    return new Director(designMap, harnesses, agentMemories, options.scorer);
   }
 }

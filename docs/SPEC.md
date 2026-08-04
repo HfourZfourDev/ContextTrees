@@ -167,6 +167,27 @@ Two integration points, both in scope:
   agent's harness is scoped by the director's routing, a micro agent's harness is scoped by the
   session's design-map branch.
 
+## 7a. Persistence
+
+Everything above is in-memory by construction — a `DesignMap`/`AgentMemoryStore`/`HarnessRegistry`
+are plain objects with no storage backend of their own. `Director.toSnapshot()` /
+`Director.fromSnapshot()` capture and restore the whole project as one plain JSON-serializable
+`ProjectSnapshot`, built by each owning class serializing its own private state directly (`nodes`/
+`edges` maps, `groups` maps, etc.) rather than by replaying through the normal mutating API — replay
+would mint fresh ids and `Date.now()` timestamps on every restore, silently corrupting version
+history. A `schemaVersion` field guards against loading an incompatible future format.
+
+Two things are deliberately excluded from a snapshot: the `RelevanceScorer` and the design map's
+`combinator`. Both are runtime dependencies — often functions, sometimes reaching out to a local
+model or a native bridge — not project data; a caller re-supplies them on restore. Sessions are
+ephemeral by design (§2, "micro layer") and are not part of a project snapshot either.
+
+The core package has no filesystem dependency, so a browser host is free to snapshot into
+IndexedDB or elsewhere. A Node file-store adapter (`src/persistence/file-store.ts`, atomic
+write-temp-then-rename) ships as a separate subpath export (`contexttrees/persistence`) rather than
+the main entry point, so consumers of the rest of the library on non-Node runtimes never pull in
+`node:fs`.
+
 ## 8. Execution gating on session refresh
 
 Automated agent runs should not fire while the host's usage/session quota is exhausted. ContextTrees

@@ -42,6 +42,7 @@ history (context bloat, stale/contradictory state). ContextTrees splits the diff
 | Review mode | `src/review.ts` | Per-branch (design map vs. agent memory) auto-commit vs. manual-review-then-commit. |
 | Refresh gate | `src/scheduler.ts` | Gates automated runs on a host's usage/session refresh, via a pluggable wakeup-scheduler adapter. |
 | Relevance scoring | `src/scoring/` | Pluggable context-manager scoring: no-model default, local model (llama.cpp), device AI (Apple). |
+| Persistence | `src/persistence/` (subpath import) | JSON snapshot of the whole project (design map, agent memories, harnesses), with a Node file-store adapter. Not in the main entry point — see below. |
 
 ## Example
 
@@ -183,6 +184,40 @@ const result = await gate.gate(() => runScheduledAgentWork());
 if (!result.ran) {
   console.log(`quota exhausted, retrying at ${new Date(result.retryAtEpochMs).toISOString()}`);
 }
+```
+
+### Persistence
+
+Everything above lives in memory only until it's snapshotted. `Director.toSnapshot()` /
+`Director.fromSnapshot()` capture and restore the whole project — design map (every node's full
+version and activation history, every edge with its relevance signals), every agent's retained
+memory, and registered harnesses — exactly as stored, not replayed through the normal API (which
+would mint new ids/timestamps). What's deliberately *not* part of a snapshot: the `RelevanceScorer`
+and the design map's `combinator`, since both can be functions or reach out to a local model/native
+bridge — runtime dependencies, not project data. Sessions are ephemeral by design and aren't
+snapshotted either.
+
+```ts
+import { Director } from "contexttrees";
+
+const snapshot = director.toSnapshot(); // plain JSON-serializable object
+const restored = Director.fromSnapshot(snapshot, { scorer: myScorer }); // scorer re-supplied, not stored
+```
+
+The core package has no filesystem dependency — a browser host could snapshot into IndexedDB, for
+instance. For Node, a file-backed adapter with atomic writes (write-temp-then-rename, so a crash
+mid-write never corrupts the project file) is available as a separate subpath import, kept out of
+the main entry point so browser/bundler consumers of the rest of the library never pull in
+`node:fs`:
+
+```ts
+import { saveProjectToFile, loadProjectFromFile, loadOrCreateProjectFile } from "contexttrees/persistence";
+
+await saveProjectToFile(director, "./project.json");
+const restored = await loadProjectFromFile("./project.json");
+
+// First run, file doesn't exist yet: returns a fresh empty Director instead of throwing.
+const director2 = await loadOrCreateProjectFile("./project.json");
 ```
 
 ## Development
