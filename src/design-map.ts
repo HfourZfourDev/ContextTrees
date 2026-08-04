@@ -116,4 +116,17 @@ export class DesignMap {
   allNodes(): DesignMapNode[] {
     return [...this.nodes.values()];
   }
+
+  /**
+   * Flattened text for a branch — node names plus current-version content —
+   * for scorers to compare candidate context against.
+   */
+  branchText(id: string): string {
+    return this.branch(id)
+      .map((node) => {
+        const content = this.current(node.id);
+        return [node.name, content.summary, ...content.roadmap, ...content.bugs, ...content.futureReview].join(" ");
+      })
+      .join(" ");
+  }
 }

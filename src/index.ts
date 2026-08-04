@@ -6,3 +6,4 @@ export * from "./session.js";
 export * from "./director.js";
 export * from "./review.js";
 export * from "./scheduler.js";
+export * from "./scoring/index.js";

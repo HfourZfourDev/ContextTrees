@@ -1,8 +1,10 @@
 import { DesignMap } from "./design-map.js";
-import { AgentMemoryStore, type ParallelAgentRecommendation, type TrimRecommendationItem } from "./agent-memory.js";
+import { AgentMemoryStore, type ParallelAgentRecommendation, type RetainInput, type TrimRecommendationItem } from "./agent-memory.js";
 import { HarnessRegistry } from "./harness.js";
 import { MicroSession, type EndSessionInput, type MicroSessionInit } from "./session.js";
 import type { DesignMapNodeContent, ReviewMode } from "./types.js";
+import { KeywordOverlapScorer } from "./scoring/keyword-overlap.js";
+import type { RelevanceScorer } from "./scoring/types.js";
 
 export interface DesignMapOutcome {
   mode: ReviewMode;
@@ -36,15 +38,19 @@ export class Director {
   readonly designMap: DesignMap;
   readonly harnesses: HarnessRegistry;
   readonly agentMemories: AgentMemoryStore;
+  /** Computes relevanceScore for retain candidates that don't supply one. Defaults to the no-model keyword scorer. */
+  readonly scorer: RelevanceScorer;
 
   constructor(
     designMap: DesignMap = new DesignMap(),
     harnesses: HarnessRegistry = new HarnessRegistry(),
     agentMemories: AgentMemoryStore = new AgentMemoryStore(),
+    scorer: RelevanceScorer = new KeywordOverlapScorer(),
   ) {
     this.designMap = designMap;
     this.harnesses = harnesses;
     this.agentMemories = agentMemories;
+    this.scorer = scorer;
   }
 
   /** Scope a new micro session to a design-map branch and equip it with agents. */
@@ -61,9 +67,10 @@ export class Director {
    * map, agent memory). Auto-mode branches commit immediately; manual-mode
    * branches return a recommendation the caller commits via `.apply()`.
    */
-  endSession(session: MicroSession, input: EndSessionInput): SessionOutcome {
+  async endSession(session: MicroSession, input: EndSessionInput): Promise<SessionOutcome> {
     session.end();
     const threshold = input.trimThreshold ?? 0.4;
+    const branchContext = this.designMap.branchText(session.branchNodeId);
 
     const applyDesignMap = (selectedNodeIds?: string[]) => {
       const toApply = selectedNodeIds
@@ -86,7 +93,19 @@ export class Director {
     const parallelAgentRecommendations: Record<string, ParallelAgentRecommendation[]> = {};
     for (const update of input.agentMemoryUpdates) {
       const memory = this.agentMemories.getOrCreate(update.agentId);
-      recommendation[update.agentId] = memory.evaluateCandidates(update.retain, session.id, threshold);
+      const resolved: RetainInput[] = await Promise.all(
+        update.retain.map(async (candidate) => ({
+          concept: candidate.concept,
+          content: candidate.content,
+          sessionId: session.id,
+          timestamp: candidate.timestamp,
+          reuseScore: candidate.reuseScore,
+          relevanceScore:
+            candidate.relevanceScore ??
+            (await this.scorer.scoreRelevance({ content: candidate.content, branchContext })),
+        })),
+      );
+      recommendation[update.agentId] = memory.evaluateCandidates(resolved, session.id, threshold);
     }
 
     const applyAgentMemory = (selected?: Record<string, string[]>) => {

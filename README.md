@@ -32,6 +32,7 @@ history (context bloat, stale/contradictory state). ContextTrees splits the diff
 | Micro session | `src/session.ts` | The ephemeral, feature-scoped unit of work; tracks recurring context passes to its agents. |
 | Review mode | `src/review.ts` | Per-branch (design map vs. agent memory) auto-commit vs. manual-review-then-commit. |
 | Refresh gate | `src/scheduler.ts` | Gates automated runs on a host's usage/session refresh, via a pluggable wakeup-scheduler adapter. |
+| Relevance scoring | `src/scoring/` | Pluggable context-manager scoring: no-model default, local model (llama.cpp), device AI (Apple). |
 
 ## Example
 
@@ -59,16 +60,15 @@ const session = director.startSession({
 
 session.recordContextPass("scoped to existing session-token handling");
 
-const outcome = director.endSession(session, {
+const outcome = await director.endSession(session, {
   designMapUpdates: [
     { nodeId: auth.id, content: { summary: "Auth + login form", roadmap: [], bugs: [], futureReview: [] } },
   ],
   agentMemoryUpdates: [
     {
       agentId: agent.id,
-      retain: [
-        { concept: "login-form-pattern", content: "...", sessionId: session.id, relevanceScore: 0.9, reuseScore: 0.8 },
-      ],
+      // relevanceScore omitted: Director resolves it via its configured RelevanceScorer.
+      retain: [{ concept: "login-form-pattern", content: "...", reuseScore: 0.8 }],
     },
   ],
 });
@@ -77,6 +77,44 @@ const outcome = director.endSession(session, {
 // With MANUAL_REVIEW instead, nothing commits until outcome.designMap.apply(...) /
 // outcome.agentMemory.apply(...) is called — optionally with a selected subset.
 ```
+
+### Relevance scoring: three context-manager options
+
+`Director` resolves a retain candidate's `relevanceScore` (how relevant proposed context is to the
+design-map branch it's scoped to) via a pluggable `RelevanceScorer`, in priority order:
+
+1. **No model (default)** — dependency-free term-frequency cosine overlap. No setup, weaker across
+   paraphrases.
+2. **Local model** — embeddings from a user-run [llama.cpp](https://github.com/ggml-org/llama.cpp)
+   server (`llama-server`), any embedding-capable GGUF model (e.g. a Gemma embedding build).
+   ContextTrees never bundles or launches a model itself.
+3. **Device AI** — on-device embeddings via a host-supplied native bridge. Apple first
+   (`NLEmbedding` from the NaturalLanguage framework); other platforms (e.g. Android/Gemini Nano)
+   would follow the same bridge shape later.
+
+These are exactly the three options a selection UI should offer; picking `local-llama-cpp` or
+`device-apple` is where the user gets prompted for that variant's remaining fields:
+
+```ts
+import { createScorer, Director } from "contexttrees";
+
+// 1. No model — no further input needed.
+const noModel = createScorer({ kind: "none" });
+
+// 2. Local model — prompt for server URL / model name.
+const local = createScorer({ kind: "local-llama-cpp", baseUrl: "http://127.0.0.1:8080" });
+
+// 3. Device AI — the native bridge comes from the host app, not typed input;
+//    `variant` (word vs. sentence embeddings) is the one user-facing choice.
+const device = createScorer({ kind: "device-apple", bridge: myAppleNativeBridge, variant: "sentence" });
+
+const director = new Director(undefined, undefined, undefined, local);
+```
+
+`AppleIntelligenceScorer` is a typed contract (`NativeEmbeddingBridge`), not a working
+implementation — there's no macOS/iOS runtime available to build or test the Swift side of that
+bridge from here. A host app on Apple platforms implements `embed()` by calling `NLEmbedding` from
+a native module and wires it in; the JS side then works unchanged.
 
 ### Delaying automated runs until a session refreshes
 

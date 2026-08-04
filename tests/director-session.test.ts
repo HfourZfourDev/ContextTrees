@@ -17,7 +17,7 @@ function setup() {
 }
 
 describe("Director + MicroSession", () => {
-  it("auto review mode commits both branches immediately on session end", () => {
+  it("auto review mode commits both branches immediately on session end", async () => {
     const { director, sub, harness } = setup();
     const agent = equipAgent("micro", harness);
     const session = director.startSession({
@@ -27,12 +27,12 @@ describe("Director + MicroSession", () => {
       reviewMode: AUTO_REVIEW,
     });
 
-    const outcome = director.endSession(session, {
+    const outcome = await director.endSession(session, {
       designMapUpdates: [{ nodeId: sub.id, content: { summary: "Auth + login form", roadmap: [], bugs: [], futureReview: [] } }],
       agentMemoryUpdates: [
         {
           agentId: agent.id,
-          retain: [{ concept: "login-form-pattern", content: "...", sessionId: session.id, relevanceScore: 0.9, reuseScore: 0.8 }],
+          retain: [{ concept: "login-form-pattern", content: "...", relevanceScore: 0.9, reuseScore: 0.8 }],
         },
       ],
     });
@@ -43,7 +43,7 @@ describe("Director + MicroSession", () => {
     expect(director.agentMemories.get(agent.id)?.current("login-form-pattern")?.content).toBe("...");
   });
 
-  it("manual review mode withholds commit until apply() is called", () => {
+  it("manual review mode withholds commit until apply() is called", async () => {
     const { director, sub, harness } = setup();
     const agent = equipAgent("micro", harness);
     const session = director.startSession({
@@ -53,12 +53,12 @@ describe("Director + MicroSession", () => {
       reviewMode: MANUAL_REVIEW,
     });
 
-    const outcome = director.endSession(session, {
+    const outcome = await director.endSession(session, {
       designMapUpdates: [{ nodeId: sub.id, content: { summary: "Auth + login form", roadmap: [], bugs: [], futureReview: [] } }],
       agentMemoryUpdates: [
         {
           agentId: agent.id,
-          retain: [{ concept: "login-form-pattern", content: "...", sessionId: session.id, relevanceScore: 0.9, reuseScore: 0.8 }],
+          retain: [{ concept: "login-form-pattern", content: "...", relevanceScore: 0.9, reuseScore: 0.8 }],
         },
       ],
     });
@@ -75,7 +75,7 @@ describe("Director + MicroSession", () => {
     expect(director.agentMemories.get(agent.id)?.current("login-form-pattern")?.content).toBe("...");
   });
 
-  it("manual apply() honors a partial selection, dropping the rest", () => {
+  it("manual apply() honors a partial selection, dropping the rest", async () => {
     const { director, sub, harness } = setup();
     const agent = equipAgent("micro", harness);
     const session = director.startSession({
@@ -85,14 +85,14 @@ describe("Director + MicroSession", () => {
       reviewMode: MANUAL_REVIEW,
     });
 
-    const outcome = director.endSession(session, {
+    const outcome = await director.endSession(session, {
       designMapUpdates: [],
       agentMemoryUpdates: [
         {
           agentId: agent.id,
           retain: [
-            { concept: "login-form-pattern", content: "a", sessionId: session.id, relevanceScore: 0.9, reuseScore: 0.8 },
-            { concept: "billing-quirk", content: "b", sessionId: session.id, relevanceScore: 0.9, reuseScore: 0.8 },
+            { concept: "login-form-pattern", content: "a", relevanceScore: 0.9, reuseScore: 0.8 },
+            { concept: "billing-quirk", content: "b", relevanceScore: 0.9, reuseScore: 0.8 },
           ],
         },
       ],
@@ -105,7 +105,7 @@ describe("Director + MicroSession", () => {
     expect(memory.current("billing-quirk")).toBeUndefined();
   });
 
-  it("ending a session marks it ended and blocks further context passes", () => {
+  it("ending a session marks it ended and blocks further context passes", async () => {
     const { director, sub, harness } = setup();
     const agent = equipAgent("micro", harness);
     const session = director.startSession({
@@ -115,7 +115,7 @@ describe("Director + MicroSession", () => {
       reviewMode: AUTO_REVIEW,
     });
     session.recordContextPass("initial scoping");
-    director.endSession(session, { designMapUpdates: [], agentMemoryUpdates: [] });
+    await director.endSession(session, { designMapUpdates: [], agentMemoryUpdates: [] });
 
     expect(session.status).toBe("ended");
     expect(() => session.recordContextPass("too late")).toThrow();
@@ -132,5 +132,40 @@ describe("Director + MicroSession", () => {
     expect(() =>
       director.startSession({ description: "x", branchNodeId: sub.id, agents: [badAgent], reviewMode: AUTO_REVIEW }),
     ).toThrow();
+  });
+
+  it("resolves relevanceScore via the configured scorer when a retain candidate omits it", async () => {
+    const { director, sub, harness } = setup();
+    director.designMap.update(sub.id, {
+      summary: "Handles login sessions and password resets",
+      roadmap: [],
+      bugs: [],
+      futureReview: [],
+    });
+    const agent = equipAgent("micro", harness);
+    const session = director.startSession({
+      description: "Add login form",
+      branchNodeId: sub.id,
+      agents: [agent],
+      reviewMode: AUTO_REVIEW,
+    });
+
+    const outcome = await director.endSession(session, {
+      designMapUpdates: [],
+      agentMemoryUpdates: [
+        {
+          agentId: agent.id,
+          retain: [
+            { concept: "on-topic", content: "login sessions and password resets", reuseScore: 0.5 },
+            { concept: "off-topic", content: "completely unrelated pastry recipe notes", reuseScore: 0.5 },
+          ],
+        },
+      ],
+    });
+
+    const items = outcome.agentMemory.recommendation[agent.id]!;
+    const onTopic = items.find((i) => i.group.concept === "on-topic")!;
+    const offTopic = items.find((i) => i.group.concept === "off-topic")!;
+    expect(onTopic.group.relevanceScore).toBeGreaterThan(offTopic.group.relevanceScore);
   });
 });

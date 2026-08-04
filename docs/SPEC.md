@@ -115,9 +115,12 @@ delayed resumption.
 ## 9. Open questions for implementation
 
 - Exact scoring function for "relevance" and "reuse likelihood" (embedding similarity? usage
-  frequency counts? explicit agent self-report?). Current implementation uses explicit, caller-supplied
-  scores (0–1) so the scoring model stays swappable and legible; no embedding/frequency model is
-  built in yet.
+  frequency counts? explicit agent self-report?). `relevanceScore` is now resolved by a pluggable
+  `RelevanceScorer` (`src/scoring/`) when a retain candidate omits it: a dependency-free
+  term-frequency-cosine default, a llama.cpp-backed local-embedding scorer, and an Apple
+  device-AI scorer contract (bridge-injected, not yet implemented against a real Swift/NLEmbedding
+  host). `reuseScore` is still explicit, caller-supplied input — no frequency-based model for it
+  yet.
 - Whether two parallel agents can share a single design-map branch, and if so, how the director
   reconciles simultaneous writes from both. Current implementation serializes design-map writes
   per-node with append-only versioning (last-write-wins pointer, full history retained), which

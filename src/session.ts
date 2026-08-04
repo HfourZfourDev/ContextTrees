@@ -1,5 +1,4 @@
 import type { AgentDescriptor, DesignMapNodeContent, ReviewModeConfig } from "./types.js";
-import type { RetainInput } from "./agent-memory.js";
 
 export interface ContextPass {
   atEpochMs: number;
@@ -67,9 +66,23 @@ export interface DesignMapUpdateRequest {
   content: DesignMapNodeContent;
 }
 
+/**
+ * What a session proposes to retain, before relevance is resolved. Omitting
+ * `relevanceScore` tells the director to compute it via the configured
+ * `RelevanceScorer` against the session's design-map branch; pass it
+ * explicitly to bypass the scorer for a given candidate.
+ */
+export interface RetainCandidate {
+  concept: string;
+  content: string;
+  reuseScore: number;
+  relevanceScore?: number;
+  timestamp?: number;
+}
+
 export interface AgentMemoryUpdateRequest {
   agentId: string;
-  retain: RetainInput[];
+  retain: RetainCandidate[];
 }
 
 export interface EndSessionInput {
