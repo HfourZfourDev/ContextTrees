@@ -1,4 +1,5 @@
 export * from "./types.js";
+export * from "./context-traversal.js";
 export * from "./design-map.js";
 export * from "./agent-memory.js";
 export * from "./harness.js";

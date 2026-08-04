@@ -1,13 +1,14 @@
 import type {
   ActivationEvent,
-  ContextPruneLevel,
   DesignMapEdge,
   DesignMapNode,
   DesignMapNodeContent,
   DesignMapNodeKind,
   DesignMapNodeVersion,
   EdgeKind,
+  EdgeRelevance,
 } from "./types.js";
+import { classifyDetail, DEFAULT_TRAVERSAL_OPTIONS, type ContextDetailLevel, type ContextTraversalOptions } from "./context-traversal.js";
 
 let nodeCounter = 0;
 function nextNodeId(): string {
@@ -31,17 +32,22 @@ const EMPTY_CONTENT: DesignMapNodeContent = {
 
 export interface AssembledReference {
   node: DesignMapNode;
-  pruneLevel: ContextPruneLevel;
-  via: DesignMapEdge;
+  /** Accumulated weight (product of every hop's weight from the primary branch) that got this node included. */
+  weight: number;
+  detail: ContextDetailLevel;
+  /** The edge whose weight decided this node's winning path, if the winning hop was an explicit edge rather than default hierarchy decay. */
+  via?: DesignMapEdge;
 }
 
 export interface AssembledContext {
-  /** The requested branch's own active subtree, always full detail. */
+  /** The requested branch's own active subtree, always full detail, unaffected by decay. */
   primary: DesignMapNode[];
   /**
-   * Nodes pulled in via edges from the primary branch, one hop out, each at
-   * the prune level its edge specifies. Deduplicated against `primary` and
-   * against each other.
+   * Nodes pulled in by spreading weighted relevance out from the primary
+   * branch — across edges and down hierarchy — until weight decays below
+   * the inclusion threshold. Deduplicated against `primary` and against
+   * each other (a node reached by multiple paths keeps its highest-weight
+   * path).
    */
   references: AssembledReference[];
 }
@@ -56,6 +62,11 @@ export interface AssembledContext {
 export class DesignMap {
   private nodes = new Map<string, DesignMapNode>();
   private edges = new Map<string, DesignMapEdge>();
+  private traversalDefaults: ContextTraversalOptions;
+
+  constructor(traversalDefaults: Partial<ContextTraversalOptions> = {}) {
+    this.traversalDefaults = { ...DEFAULT_TRAVERSAL_OPTIONS, ...traversalDefaults };
+  }
 
   addNode(
     kind: DesignMapNodeKind,
@@ -209,10 +220,17 @@ export class DesignMap {
 
   // ---- Cross-branch edges ---------------------------------------------------
 
-  addEdge(fromNodeId: string, toNodeId: string, kind: EdgeKind, pruneLevel: ContextPruneLevel, note?: string): DesignMapEdge {
+  /**
+   * `relevance` combines dependency (structural coupling) and importance
+   * (criticality independent of coupling) into the weight decay math uses.
+   * Works between any two nodes — including a parent and its own child, to
+   * override the default hierarchy decay for that specific pair (e.g. "this
+   * child stays 90%+ as relevant as its parent, don't decay it normally").
+   */
+  addEdge(fromNodeId: string, toNodeId: string, kind: EdgeKind, relevance: EdgeRelevance, note?: string): DesignMapEdge {
     this.requireNode(fromNodeId);
     this.requireNode(toNodeId);
-    const edge: DesignMapEdge = { id: nextEdgeId(), fromNodeId, toNodeId, kind, pruneLevel, note };
+    const edge: DesignMapEdge = { id: nextEdgeId(), fromNodeId, toNodeId, kind, relevance, note };
     this.edges.set(edge.id, edge);
     return edge;
   }
@@ -233,45 +251,69 @@ export class DesignMap {
 
   /**
    * Targeted context for a session scoped to `rootId`: the branch's own
-   * active subtree in full, plus whatever its nodes' outgoing edges pull
-   * in — one hop out, at each edge's prune level. Dormant targets are
-   * skipped even if referenced. This is deliberately bounded to one hop:
-   * edges are not chased transitively, so a chain of "full" edges can't
-   * silently pull in the whole map.
+   * active subtree in full, plus everything reachable by spreading weighted
+   * relevance out from it — across edges and down hierarchy — until weight
+   * decays below `inclusionThreshold`. Unlike a fixed hop limit, this is
+   * self-bounding: a strong edge can chase several hops deep, a weak one
+   * dies out almost immediately, without per-branch threshold tuning (see
+   * `ContextTraversalOptions.inclusionThreshold`). Dormant targets are
+   * skipped, and their subtrees are not expanded into.
    */
-  assembleContext(rootId: string): AssembledContext {
+  assembleContext(rootId: string, overrides: Partial<ContextTraversalOptions> = {}): AssembledContext {
+    const options: ContextTraversalOptions = { ...this.traversalDefaults, ...overrides };
     const primary = this.activeBranch(rootId);
     const visited = new Set(primary.map((n) => n.id));
     const references: AssembledReference[] = [];
 
-    const outgoingEdges = primary.flatMap((node) => this.edgesFrom(node.id));
-    for (const edge of outgoingEdges) {
-      if (visited.has(edge.toNodeId)) continue;
-      if (!this.isActive(edge.toNodeId)) continue;
+    interface Candidate {
+      nodeId: string;
+      weight: number;
+      via?: DesignMapEdge;
+    }
+    const frontier: Candidate[] = [];
 
-      if (edge.pruneLevel === "full") {
-        for (const node of this.activeBranch(edge.toNodeId)) {
-          if (visited.has(node.id)) continue;
-          visited.add(node.id);
-          references.push({ node, pruneLevel: "full", via: edge });
-        }
-      } else {
-        const node = this.requireNode(edge.toNodeId);
-        visited.add(node.id);
-        references.push({ node, pruneLevel: edge.pruneLevel, via: edge });
+    const enqueueFrom = (node: DesignMapNode, weight: number) => {
+      const outgoing = this.edgesFrom(node.id);
+      for (const child of this.children(node.id)) {
+        if (visited.has(child.id)) continue;
+        const override = outgoing.find((e) => e.toNodeId === child.id);
+        const stepWeight = override ? options.combinator(override.relevance) : options.hierarchyDecay;
+        frontier.push({ nodeId: child.id, weight: weight * stepWeight, via: override });
       }
+      for (const edge of outgoing) {
+        if (visited.has(edge.toNodeId)) continue;
+        frontier.push({ nodeId: edge.toNodeId, weight: weight * options.combinator(edge.relevance), via: edge });
+      }
+    };
+
+    for (const node of primary) enqueueFrom(node, 1);
+
+    while (frontier.length > 0) {
+      frontier.sort((a, b) => b.weight - a.weight);
+      const candidate = frontier.shift()!;
+      // Sorted descending: once the global max drops below the threshold, nothing remaining can qualify either.
+      if (candidate.weight < options.inclusionThreshold) break;
+      if (visited.has(candidate.nodeId)) continue;
+      if (!this.isActive(candidate.nodeId)) {
+        visited.add(candidate.nodeId);
+        continue;
+      }
+      visited.add(candidate.nodeId);
+      const node = this.requireNode(candidate.nodeId);
+      references.push({ node, weight: candidate.weight, detail: classifyDetail(candidate.weight, options), via: candidate.via });
+      enqueueFrom(node, candidate.weight);
     }
 
     return { primary, references };
   }
 
-  /** Renders an AssembledContext to text, respecting each node's prune level. */
+  /** Renders an AssembledContext to text, respecting each node's computed detail level. */
   contextText(assembled: AssembledContext): string {
     const parts: string[] = [];
     for (const node of assembled.primary) parts.push(this.renderFull(node));
     for (const ref of assembled.references) {
-      if (ref.pruneLevel === "full") parts.push(this.renderFull(ref.node));
-      else if (ref.pruneLevel === "interface") parts.push(this.renderInterface(ref.node));
+      if (ref.detail === "full") parts.push(this.renderFull(ref.node));
+      else if (ref.detail === "interface") parts.push(this.renderInterface(ref.node));
       else parts.push(this.renderReference(ref.node));
     }
     return parts.join(" ");

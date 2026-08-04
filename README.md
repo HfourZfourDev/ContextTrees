@@ -20,7 +20,8 @@ history (context bloat, stale/contradictory state). ContextTrees splits the diff
   hierarchy. Nodes in different branches can reference each other via **edges** ("checkout flows
   into payments"), independent of the parent/child structure.
 - A **micro layer** spins up ephemeral sessions scoped to one feature/task, assembled from the
-  relevant *branch* of the design map plus its edge-declared dependencies — never the whole map.
+  relevant *branch* of the design map plus whatever weighted relevance spreads into it from
+  elsewhere in the map — never the whole map, and never a rigid one-hop cutoff either.
 - A branch can go **dormant** without being deleted: still there, still auditable, just excluded
   from context assembly until the director decides it's relevant again.
 - When a session ends, its outcome splits into two independent, reviewable update paths: what the
@@ -32,7 +33,7 @@ history (context bloat, stale/contradictory state). ContextTrees splits the diff
 | Concept | Module | What it is |
 |---|---|---|
 | Design map | `src/design-map.ts` | Versioned, unconstrained-depth roadmap tree. Each node has a `status` (built/planned/shell/unintegrated). Updates append a new version; nothing is overwritten. |
-| Edges + context assembly | `src/design-map.ts` | Cross-branch references with a **prune level** (`full` / `interface` / `reference`) controlling how much of the target gets pulled into a session's context. |
+| Edges + weighted context assembly | `src/design-map.ts`, `src/context-traversal.ts` | Cross-branch references authored as `{dependency, importance, recency?}`, combined into a single weight that **decays** across edges and down hierarchy until it drops below a threshold — not a fixed hop limit. |
 | Activation | `src/design-map.ts` | A node can go active/dormant without being deleted — dormant branches are excluded from context assembly but remain in the map for audit and reactivation. |
 | Agent memory | `src/agent-memory.ts` | Per-agent retained context, tagged by session + timestamp, scored for retain/drop and for splitting into a parallel sibling agent. |
 | Harness | `src/harness.ts` | A toolset + system prompt + constraints an agent is equipped with, independent of any one agent instance. |
@@ -53,9 +54,10 @@ const payments = director.designMap.addNode("feature", "Payments", null, { statu
 const someStaleNode = director.designMap.addNode("feature", "Old password-reset flow", auth.id, { status: "shell" });
 
 // Auth and Payments live in different branches but need to talk — declare the
-// relationship explicitly, and control how much of Payments a session about
-// Auth actually gets: "full" because this is genuine mutual dependency.
-director.designMap.addEdge(auth.id, payments.id, "integrates-with", "full");
+// relationship explicitly. Weight is authored as dependency + importance
+// (0-1 each, combined into a single decay weight, ~0.8 here) rather than a
+// manually picked "full/interface/reference" label — see §Weighted context below.
+director.designMap.addEdge(auth.id, payments.id, "integrates-with", { dependency: 0.9, importance: 0.6 });
 
 const harness = director.harnesses.register({
   id: "reader",
@@ -73,7 +75,8 @@ const session = director.startSession({
 });
 
 // session.contextText is exactly what got assembled: the Auth branch in full,
-// plus Payments pulled in at "full" via the edge -- not the whole map.
+// plus Payments (weight ~0.8, above the "full" threshold) and whatever
+// decayed relevance spread further from there -- not the whole map.
 session.recordContextPass("scoped to existing session-token handling");
 
 const outcome = await director.endSession(session, {
@@ -100,6 +103,34 @@ const outcome = await director.endSession(session, {
 director.auditDormantBranches().forEach((n) => console.log(n.name, "is dormant"));
 director.designMap.activate(someStaleNode.id, { reason: "turns out we need it again" });
 ```
+
+### Weighted context assembly
+
+Edges don't declare a fixed detail level — they declare `{dependency, importance, recency?}`, which
+combine (`src/context-traversal.ts`) into a single 0-1 weight. Context assembly is a decay-limited
+search out from the session's branch: at every hop — across an edge, or down into a node's own
+children — weight gets multiplied by that hop's weight, and the search stops expanding once
+accumulated weight drops below `inclusionThreshold`. Nodes that do clear the bar are rendered at a
+detail tier (`full` / `interface` / `reference`) computed from how much weight they still have.
+
+This is deliberately not a fixed hop count. One global inclusion threshold, combined with
+multiplication, produces the "adaptive strictness" you'd want without per-branch tuning: a strong
+edge (0.8) leaves several decayed hops of room before its descendants fall out; a weak edge (0.3)
+leaves almost none — its children need to retain nearly all of that 0.3 to still qualify. A specific
+child that matters more than its siblings can be given its own edge directly to its parent,
+overriding the default per-level decay for just that pair:
+
+```ts
+// B -> D is weak (0.3): most of D's children get pruned by default decay next hop.
+director.designMap.addEdge(b.id, d.id, "data-hookup", { dependency: 0.35, importance: 0.2 });
+
+// ...except this one, which is explicitly marked critical to D and survives anyway.
+director.designMap.addEdge(d.id, criticalChild.id, "critical-path", { dependency: 0.95, importance: 0.9 });
+```
+
+Tune the defaults globally (`new DesignMap({ inclusionThreshold: 0.15, hierarchyDecay: 0.8 })`) or
+per session (`director.startSession(init, { inclusionThreshold: 0.15 })`); swap `combinator` for a
+custom function if dependency/importance/recency isn't the right formula for your project.
 
 ### Relevance scoring: three context-manager options
 

@@ -46,23 +46,31 @@ export interface DesignMapNode {
 export type EdgeKind = string;
 
 /**
- * How much of an edge's target branch to pull into context when assembling
- * a session's scope:
- * - "full": the target's entire active subtree, full content — genuinely
- *   co-dependent features that both need full mutual context.
- * - "interface": just the target node's own current content, no
- *   descendants — "this is our data flow hookup point."
- * - "reference": just an identifying pointer (name + status) — bare
- *   acknowledgement that something exists, aggressively pruned.
+ * What an edge is authored with — relevance is a combination of signals,
+ * not one number picked out of thin air:
+ * - `dependency`: structural coupling — does the target's behavior/data
+ *   actually feed this node at runtime. The dominant signal.
+ * - `importance`: how much this relationship matters even independent of
+ *   tight coupling — criticality, priority, blast radius if it breaks.
+ * - `recency` (optional): how recently this relationship was touched or
+ *   confirmed relevant. A mild tiebreaker only, never dominant.
+ *
+ * These combine (see `context-traversal.ts`) into the single 0-1 weight
+ * used for decay math — how far and how much of the target's own branch
+ * gets pulled into a session's context.
  */
-export type ContextPruneLevel = "full" | "interface" | "reference";
+export interface EdgeRelevance {
+  dependency: number;
+  importance: number;
+  recency?: number;
+}
 
 export interface DesignMapEdge {
   id: string;
   fromNodeId: string;
   toNodeId: string;
   kind: EdgeKind;
-  pruneLevel: ContextPruneLevel;
+  relevance: EdgeRelevance;
   note?: string;
 }
 

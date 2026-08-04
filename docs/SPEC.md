@@ -43,27 +43,41 @@ mind, but standalone — no dependency on any specific host project or LLM provi
 6. Session ends.
 7. Split into two parallel, independent update paths (Branch A, Branch B — see below).
 
-## 2a. Context assembly: edges and prune levels
+## 2a. Context assembly: weighted decay, not a fixed hop limit
 
 A branch's own subtree can't carry everything a session needs — features that reference each
-other often live in different branches. A node can declare an edge to a node elsewhere in the map,
-and every edge carries a **prune level** controlling how much of the target gets pulled into a
-session's context:
+other often live in different branches, and "how much" of a dependency matters varies wildly (a
+genuinely co-dependent feature needs real mutual context; a passing data-flow hookup needs almost
+none). This is modeled as relevance that **spreads and decays**, not a manually authored per-edge
+label:
 
-- **`full`** — the target's entire active subtree, full content. Use for genuinely co-dependent
-  features where the session needs real context on both sides.
-- **`interface`** — just the target node's own current content, no descendants. Use for "this is
-  our data flow hookup point" — enough to know the shape of the interface, not its internals.
-- **`reference`** — just an identifying pointer (name + status). Aggressively pruned: a bare
-  acknowledgement that something exists, nothing more.
+- An edge is authored as `{ dependency, importance, recency? }` (each 0-1) — `dependency` is
+  structural coupling (does the target's behavior/data actually feed this node), `importance` is
+  criticality independent of coupling, `recency` is an optional mild tiebreaker. These combine
+  (`src/context-traversal.ts`, default: `0.65*dependency + 0.35*importance`, recency shaving up to
+  20%) into a single 0-1 weight.
+- Context assembly is a decay-limited search outward from the session's primary branch: at every
+  hop — across an edge, or down into a node's own children — weight is multiplied by that hop's
+  weight. A parent-child hop with no explicit edge uses a default hierarchy-decay constant;
+  an explicit edge authored directly between a parent and one specific child overrides that
+  default for just that pair (the way to mark one child as unusually critical to its parent
+  without changing the decay for its siblings).
+- The search stops expanding a path once accumulated weight drops below a single global
+  `inclusionThreshold`. This one constant, combined with multiplication, produces adaptive
+  strictness without per-branch tuning: a strong first hop (e.g. 0.8) leaves room for several more
+  decayed hops before falling out; a weak first hop (e.g. 0.3) leaves almost none — its children
+  need to retain nearly all of that 0.3 to still clear the same absolute line.
+- Included nodes are rendered at a detail tier (`full` / `interface` / `reference`) computed from
+  how much weight they still carry, not authored per edge.
+- A dormant edge target (§2b) is skipped, and its subtree is not expanded into.
 
-Edge traversal is **one hop only** from the session's primary branch — edges are not chased
-transitively, so a chain of `full` edges can't silently pull in the whole map. A dormant edge
-target (§2b) is skipped even if referenced.
+This replaces an earlier one-hop-only design: edges are now chased transitively, bounded by decay
+rather than by hop count, which is both more general (a strong dependency chain several hops deep
+still surfaces) and still bounded (nothing pulls in the whole map, because weight can only shrink).
 
 This is how "the director only passes relevant context" stays true in practice: the session gets
-its own branch in full, plus exactly the declared dependencies at exactly the declared level of
-detail, and nothing else.
+its own branch in full, plus whatever weighted relevance actually earns its way in, at whatever
+level of detail its decayed weight justifies — nothing pinned by hand, nothing unbounded.
 
 ## 2b. Activation: dormant, not deleted
 
@@ -132,8 +146,8 @@ Governs what gets written back into the persistent design map.
 - **Design map**: unconstrained-depth tree, versioned nodes, each carrying a `status`
   (built/planned/shell/unintegrated) plus roadmap / bugs / future-review metadata, and an
   independent active/dormant flag (§2b).
-- **Edges**: `{ fromNodeId, toNodeId, kind, pruneLevel, note? }` — cross-branch relationships,
-  separate from the parent/child hierarchy (§2a).
+- **Edges**: `{ fromNodeId, toNodeId, kind, relevance: {dependency, importance, recency?}, note? }`
+  — cross-branch (or parent-child override) relationships, separate from the hierarchy (§2a).
 - **Agent memory**: per-agent list of retained context groups, each tagged (session_id,
   timestamp). Conflicting groups on the same concept are versioned, not overwritten.
 - **Agent lineage**: parent_agent_id + originating_session_id on any spawned parallel agent.
@@ -182,7 +196,10 @@ delayed resumption.
   implementation: read-only audit trail (`history()` accessors); no restore/rollback API yet. Note
   this is distinct from activation (§2b), which is implemented and is not version-based: a node's
   content history is untouched by deactivation, only its inclusion in context assembly changes.
-- How deeply to chase edges. Current implementation is one hop only from the primary branch,
-  deliberately, to keep context bounded and predictable. Worth revisiting if one-hop turns out to
-  miss real transitive dependencies in practice (e.g. A needs an `interface`-level view of B, which
-  itself needs a `full` view of C).
+- Whether `0.65*dependency + 0.35*importance` (plus the default `hierarchyDecay`/threshold
+  constants) are the right defaults in practice, versus values a real project would want to tune
+  per-branch or learn from usage. Currently a single global default per `DesignMap`, overridable
+  per call to `assembleContext`/`startSession`, with a swappable `combinator` for a different
+  formula entirely — no learning/calibration from actual session outcomes yet.
+- Whether a node reached by multiple independent paths should report all of them (for audit —
+  "why was this included") rather than just its highest-weight path, which is what's kept today.

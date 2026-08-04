@@ -4,6 +4,7 @@ import { AgentMemoryStore, type ParallelAgentRecommendation, type RetainInput, t
 import { HarnessRegistry } from "./harness.js";
 import { MicroSession, type ActivationUpdateRequest, type EndSessionInput, type MicroSessionInit } from "./session.js";
 import type { DesignMapNodeContent, ReviewMode } from "./types.js";
+import type { ContextTraversalOptions } from "./context-traversal.js";
 import { KeywordOverlapScorer } from "./scoring/keyword-overlap.js";
 import type { RelevanceScorer } from "./scoring/types.js";
 
@@ -61,10 +62,12 @@ export class Director {
   /**
    * Scope a new micro session to a design-map branch and equip it with
    * agents. Context passed to the session is assembled here: the branch's
-   * own active subtree in full, plus whatever it references via edges, at
-   * each edge's prune level — not the whole map.
+   * own active subtree in full, plus whatever weighted relevance spreads
+   * into from it — across edges and down hierarchy, decaying with distance
+   * — not the whole map. Pass `contextOptions` to override the decay/
+   * threshold defaults for this one session.
    */
-  startSession(init: StartSessionInput): MicroSession {
+  startSession(init: StartSessionInput, contextOptions: Partial<ContextTraversalOptions> = {}): MicroSession {
     this.designMap.requireNode(init.branchNodeId);
     if (!this.designMap.isActive(init.branchNodeId)) {
       throw new Error(
@@ -74,7 +77,7 @@ export class Director {
     for (const agent of init.agents) {
       this.harnesses.requireHarness(agent.harnessId);
     }
-    const context = this.designMap.assembleContext(init.branchNodeId);
+    const context = this.designMap.assembleContext(init.branchNodeId, contextOptions);
     const contextText = this.designMap.contextText(context);
     return new MicroSession({ ...init, context, contextText });
   }

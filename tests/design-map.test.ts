@@ -90,58 +90,78 @@ describe("DesignMap", () => {
     });
   });
 
-  describe("edges + context assembly", () => {
-    it("assembleContext pulls a 'full' edge target's entire active subtree in as references", () => {
+  describe("edges + weighted context assembly", () => {
+    const strong = { dependency: 0.9, importance: 0.6 }; // combinator ~0.795
+    const weak = { dependency: 0.1, importance: 0.1 }; // combinator ~0.1
+
+    it("a strong edge pulls the target in at 'full' detail, and decay carries into its own children", () => {
       const map = new DesignMap();
       const checkout = map.addNode("feature", "Checkout", null, { status: "built" });
       const payments = map.addNode("feature", "Payments", null, { status: "built" });
       const paymentsDetail = map.addNode("feature", "Payments retry logic", payments.id, { status: "built" });
-      map.addEdge(checkout.id, payments.id, "integrates-with", "full");
+      map.addEdge(checkout.id, payments.id, "integrates-with", strong);
 
       const assembled = map.assembleContext(checkout.id);
-      const referenceIds = assembled.references.map((r) => r.node.id);
-      expect(referenceIds).toContain(payments.id);
-      expect(referenceIds).toContain(paymentsDetail.id);
-      expect(assembled.references.every((r) => r.pruneLevel === "full")).toBe(true);
+      const byId = new Map(assembled.references.map((r) => [r.node.id, r]));
+      expect(byId.get(payments.id)?.detail).toBe("full");
+      // paymentsDetail is reached via default hierarchy decay (0.795 * 0.7 ≈ 0.56), not a "full" edge --
+      // still included (>= inclusionThreshold) but at a lower detail tier than its parent.
+      expect(byId.has(paymentsDetail.id)).toBe(true);
+      expect(byId.get(paymentsDetail.id)?.detail).not.toBe("full");
     });
 
-    it("assembleContext pulls only the target node itself for 'interface' and 'reference' edges, not its descendants", () => {
-      const map = new DesignMap();
-      const featureA = map.addNode("feature", "A");
-      const hookup = map.addNode("feature", "Data flow hookup point", null, { status: "shell" });
-      const hookupDetail = map.addNode("feature", "hookup internals", hookup.id);
-      map.addEdge(featureA.id, hookup.id, "data-hookup", "reference");
-
-      const assembled = map.assembleContext(featureA.id);
-      const referenceIds = assembled.references.map((r) => r.node.id);
-      expect(referenceIds).toEqual([hookup.id]);
-      expect(referenceIds).not.toContain(hookupDetail.id);
-      expect(assembled.references[0]?.pruneLevel).toBe("reference");
-    });
-
-    it("assembleContext skips dormant edge targets entirely", () => {
+    it("a weak edge is excluded entirely", () => {
       const map = new DesignMap();
       const a = map.addNode("feature", "A");
-      const b = map.addNode("feature", "B");
-      map.addEdge(a.id, b.id, "flows-into", "interface");
-      map.deactivate(b.id);
+      const b = map.addNode("feature", "B", null, { status: "shell" });
+      map.addEdge(a.id, b.id, "loosely-related", weak);
 
       const assembled = map.assembleContext(a.id);
       expect(assembled.references).toHaveLength(0);
     });
 
-    it("assembleContext does not chase edges transitively past one hop", () => {
+    it("skips dormant edge targets, and does not expand into their subtree", () => {
+      const map = new DesignMap();
+      const a = map.addNode("feature", "A");
+      const b = map.addNode("feature", "B");
+      const bChild = map.addNode("feature", "B child", b.id);
+      map.addEdge(a.id, b.id, "flows-into", strong);
+      map.deactivate(b.id);
+
+      const assembled = map.assembleContext(a.id);
+      expect(assembled.references).toHaveLength(0);
+      expect(assembled.references.map((r) => r.node.id)).not.toContain(bChild.id);
+    });
+
+    it("chases edges transitively, decaying with each hop, unlike a fixed one-hop limit", () => {
       const map = new DesignMap();
       const a = map.addNode("feature", "A");
       const b = map.addNode("feature", "B");
       const c = map.addNode("feature", "C");
-      map.addEdge(a.id, b.id, "flows-into", "interface");
-      map.addEdge(b.id, c.id, "flows-into", "interface");
+      map.addEdge(a.id, b.id, "flows-into", strong);
+      map.addEdge(b.id, c.id, "flows-into", strong);
 
       const assembled = map.assembleContext(a.id);
       const referenceIds = assembled.references.map((r) => r.node.id);
-      expect(referenceIds).toEqual([b.id]);
-      expect(referenceIds).not.toContain(c.id);
+      expect(referenceIds).toContain(b.id);
+      expect(referenceIds).toContain(c.id); // two strong hops still clears the threshold
+      const cRef = assembled.references.find((r) => r.node.id === c.id)!;
+      expect(cRef.weight).toBeLessThan(assembled.references.find((r) => r.node.id === b.id)!.weight);
+    });
+
+    it("an explicit parent-child edge overrides the default hierarchy decay for that one hop", () => {
+      const map = new DesignMap();
+      const a = map.addNode("feature", "A");
+      const b = map.addNode("feature", "B");
+      const ordinaryChild = map.addNode("feature", "ordinary child", b.id);
+      const specialChild = map.addNode("feature", "special child", b.id);
+      map.addEdge(a.id, b.id, "flows-into", weak); // deliberately weak so default-decay children fall below threshold
+      map.addEdge(b.id, specialChild.id, "critical-path", { dependency: 0.95, importance: 0.9 });
+
+      const assembled = map.assembleContext(a.id);
+      const referenceIds = assembled.references.map((r) => r.node.id);
+      expect(referenceIds).not.toContain(ordinaryChild.id);
+      expect(referenceIds).not.toContain(b.id); // b itself is already below threshold at "weak"
     });
 
     it("contextText renders full/interface/reference nodes at different detail levels", () => {
@@ -149,13 +169,54 @@ describe("DesignMap", () => {
       const a = map.addNode("feature", "Root", null, { status: "built", summary: "root summary", roadmap: ["roadmap item"] });
       const fullTarget = map.addNode("feature", "FullTarget", null, { status: "built", summary: "full summary", roadmap: ["hidden-if-pruned"] });
       const refTarget = map.addNode("feature", "RefTarget", null, { status: "shell", summary: "ref summary", roadmap: ["never-shown"] });
-      map.addEdge(a.id, fullTarget.id, "integrates-with", "full");
-      map.addEdge(a.id, refTarget.id, "data-hookup", "reference");
+      map.addEdge(a.id, fullTarget.id, "integrates-with", { dependency: 1, importance: 1 });
+      map.addEdge(a.id, refTarget.id, "data-hookup", { dependency: 0.3, importance: 0.2 });
 
       const text = map.contextText(map.assembleContext(a.id));
       expect(text).toContain("hidden-if-pruned");
       expect(text).toContain("RefTarget");
       expect(text).not.toContain("never-shown");
+    });
+
+    it("per-call traversal options can override the DesignMap's defaults", () => {
+      const map = new DesignMap();
+      const a = map.addNode("feature", "A");
+      const b = map.addNode("feature", "B");
+      map.addEdge(a.id, b.id, "flows-into", weak); // ~0.1, below the default 0.2 inclusionThreshold
+
+      expect(map.assembleContext(a.id).references).toHaveLength(0);
+      const lenient = map.assembleContext(a.id, { inclusionThreshold: 0.05 });
+      expect(lenient.references.map((r) => r.node.id)).toContain(b.id);
+    });
+
+    it("reproduces the A/B/C/D illustration: strong branch decays generously, weak branch decays strictly", () => {
+      // A -> B strong (~0.8): B included in full, and B's own children (default decay) still clear the bar.
+      // B -> C weak (~0.1): ignored entirely.
+      // B -> D weak-ish (~0.3): D is included, but barely -- almost none of D's ordinary children survive
+      // the next hop, unless a child has its own near-parent-strength edge overriding the default decay.
+      const map = new DesignMap();
+      const a = map.addNode("feature", "A");
+      const b = map.addNode("feature", "B", null, { status: "built" });
+      const bChild = map.addNode("feature", "B's child", b.id);
+      const c = map.addNode("feature", "C", null, { status: "shell" });
+      const d = map.addNode("feature", "D", null, { status: "shell" });
+      const dOrdinaryChild = map.addNode("feature", "D's ordinary child", d.id);
+      const dCriticalChild = map.addNode("feature", "D's critical child", d.id);
+
+      map.addEdge(a.id, b.id, "integrates-with", { dependency: 0.9, importance: 0.6 }); // ~0.795
+      map.addEdge(b.id, c.id, "loosely-related", { dependency: 0.1, importance: 0.1 }); // ~0.1
+      map.addEdge(b.id, d.id, "data-hookup", { dependency: 0.35, importance: 0.2 }); // ~0.30
+      map.addEdge(d.id, dCriticalChild.id, "critical-path", { dependency: 0.95, importance: 0.9 }); // ~0.93, overrides default decay
+
+      const assembled = map.assembleContext(a.id);
+      const included = new Set(assembled.references.map((r) => r.node.id));
+
+      expect(included.has(b.id)).toBe(true);
+      expect(included.has(bChild.id)).toBe(true); // B is strong enough that ordinary decay still clears the bar
+      expect(included.has(c.id)).toBe(false); // ignored
+      expect(included.has(d.id)).toBe(true); // pulled in, but weakly
+      expect(included.has(dOrdinaryChild.id)).toBe(false); // most of D's sub-branches pruned
+      expect(included.has(dCriticalChild.id)).toBe(true); // ...unless explicitly marked critical to D
     });
   });
 });
