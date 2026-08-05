@@ -42,7 +42,7 @@ history (context bloat, stale/contradictory state). ContextTrees splits the diff
 | Review mode | `src/review.ts` | Per-branch (design map vs. agent memory) auto-commit vs. manual-review-then-commit. |
 | Refresh gate | `src/scheduler.ts` | Gates automated runs on a host's usage/session refresh, via a pluggable wakeup-scheduler adapter. |
 | Relevance scoring | `src/scoring/` | Pluggable context-manager scoring: no-model default, local model (llama.cpp), device AI (Apple). |
-| Persistence | `src/persistence/` (subpath import) | JSON snapshot of the whole project (design map, agent memories, harnesses), with a Node file-store adapter. Not in the main entry point — see below. |
+| Persistence | `src/persistence/` (subpath imports) | JSON snapshot of the whole project (design map, agent memories, harnesses), with Node, IndexedDB, File System Access, and GitHub-backed adapters. Not in the main entry point — see below. |
 
 ## Example
 
@@ -204,11 +204,12 @@ const snapshot = director.toSnapshot(); // plain JSON-serializable object
 const restored = Director.fromSnapshot(snapshot, { scorer: myScorer }); // scorer re-supplied, not stored
 ```
 
-The core package has no filesystem dependency — a browser host could snapshot into IndexedDB, for
-instance. For Node, a file-backed adapter with atomic writes (write-temp-then-rename, so a crash
-mid-write never corrupts the project file) is available as a separate subpath import, kept out of
-the main entry point so browser/bundler consumers of the rest of the library never pull in
-`node:fs`:
+The core package has no filesystem dependency. Four storage adapters are available, each its own
+subpath import so a consumer only pulls in what it actually uses:
+
+**Node (`contexttrees/persistence`)** — file-backed, atomic writes (write-temp-then-rename, so a
+crash mid-write never corrupts the project file). Kept out of the main entry point so browser/
+bundler consumers of the rest of the library never pull in `node:fs`:
 
 ```ts
 import { saveProjectToFile, loadProjectFromFile, loadOrCreateProjectFile } from "contexttrees/persistence";
@@ -218,6 +219,58 @@ const restored = await loadProjectFromFile("./project.json");
 
 // First run, file doesn't exist yet: returns a fresh empty Director instead of throwing.
 const director2 = await loadOrCreateProjectFile("./project.json");
+```
+
+**IndexedDB (`contexttrees/persistence-indexeddb`)** — the universal browser fallback. IndexedDB
+transactions already commit atomically. Projects are keyed by an overridable `projectId` (default
+`"default"`), so one database can hold more than one project:
+
+```ts
+import { saveProjectToIndexedDB, loadProjectFromIndexedDB, loadOrCreateProjectFromIndexedDB } from "contexttrees/persistence-indexeddb";
+
+await saveProjectToIndexedDB(director);
+const restored = await loadOrCreateProjectFromIndexedDB(); // fresh empty Director on first run
+```
+
+**File System Access API (`contexttrees/persistence-fs-access`)** — reads/writes a JSON file at a
+relative path (default `.contexttrees/project.json`) within a caller-supplied
+`FileSystemDirectoryHandle`; the host owns obtaining that handle (`showDirectoryPicker()`) and any
+permission grant. **Chromium only** — Chrome/Edge/Opera implement the local-disk picker this relies
+on; Firefox and Safari expose only the sandboxed Origin Private File System, not real folder access.
+Feature-detect (`"showDirectoryPicker" in window`) before offering it, with IndexedDB as the
+fallback. Per the spec/MDN, `createWritable()` writes to a temporary swap file and only replaces the
+real file on `close()` — the same crash-safety guarantee as the Node adapter, with one caveat the
+Node adapter doesn't have: independent concurrent writers each get their own swap file, and the
+*last one closed* wins silently:
+
+```ts
+import { saveProjectToDirectory, loadOrCreateProjectInDirectory } from "contexttrees/persistence-fs-access";
+
+const dir = await window.showDirectoryPicker();
+await saveProjectToDirectory(director, dir);
+const restored = await loadOrCreateProjectInDirectory(dir);
+```
+
+**GitHub Contents API (`contexttrees/persistence-github`)** — plain `fetch` against
+`/repos/{owner}/{repo}/contents/{path}` (no SDK dependency); the caller supplies `owner`/`repo`/
+`path`/`branch`/`token`, never bundled or defaulted. Direct-commit only for now — a PR-based review
+mode is a bigger feature, tracked as a follow-up rather than built here. Updates require the file's
+current blob `sha`; omit it and the adapter auto-resolves the latest sha right before writing, but a
+real concurrent edit still surfaces as a thrown `GitHubConflictError` (GitHub returns HTTP 409 on a
+sha mismatch) rather than a silent clobber:
+
+```ts
+import { saveProjectToGitHub, loadOrCreateProjectFromGitHub, GitHubConflictError } from "contexttrees/persistence-github";
+
+const target = { owner: "my-org", repo: "my-project", path: "contexttrees/project.json", branch: "main", token };
+const restored = await loadOrCreateProjectFromGitHub(target);
+try {
+  await saveProjectToGitHub(restored, target);
+} catch (err) {
+  if (err instanceof GitHubConflictError) {
+    // someone else committed to `path` since this session's copy was loaded
+  }
+}
 ```
 
 ## Development

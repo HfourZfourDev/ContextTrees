@@ -13,6 +13,18 @@
     "./persistence": {
       "types": "./dist/persistence/index.d.ts",
       "import": "./dist/persistence/index.js"
+    },
+    "./persistence-indexeddb": {
+      "types": "./dist/persistence/indexeddb-store.d.ts",
+      "import": "./dist/persistence/indexeddb-store.js"
+    },
+    "./persistence-fs-access": {
+      "types": "./dist/persistence/fs-access-store.d.ts",
+      "import": "./dist/persistence/fs-access-store.js"
+    },
+    "./persistence-github": {
+      "types": "./dist/persistence/github-store.d.ts",
+      "import": "./dist/persistence/github-store.js"
     }
   },
   "files": [
@@ -27,6 +39,7 @@
   "license": "GPL-2.0",
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "fake-indexeddb": "^6.2.5",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"
   }
